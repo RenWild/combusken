@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sort"
 	"sync"
@@ -18,6 +19,7 @@ const SMPCycles = 16
 
 var SkipSize = []int{1, 1, 1, 2, 2, 2, 1, 3, 2, 2, 1, 3, 3, 2, 2, 1}
 var SkipDepths = []int{1, 2, 2, 4, 4, 3, 2, 5, 4, 3, 2, 6, 5, 4, 3, 2}
+var lmrTable [64][64]int
 
 func lossIn(height int) int {
 	return -Mate + height
@@ -161,11 +163,18 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		if !pos.MakeMove(evaled[i].Move, child) {
 			continue
 		}
+		reduction := 0
 		moveCount++
 		childInCheck := child.IsInCheck()
 		if !inCheck && moveCount > 1 && evaled[i].Value < MinSpecialMoveValue && !evaled[i].Move.IsCaptureOrPromotion() &&
 			!childInCheck {
-			if depth < 3 {
+			if depth >= 3 {
+				reduction := lmrTable[min(depth, 63)][min(moveCount, 63)]
+				if !pvNode {
+					reduction++
+				}
+				reduction = max(0, min(depth-2, reduction))
+			} else {
 				if moveCount >= 9+3*depth {
 					continue
 				}
@@ -182,8 +191,8 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		if !evaled[i].Move.IsCaptureOrPromotion() {
 			quietsSearched = append(quietsSearched, evaled[i].Move)
 		}
-		if !pvNode && moveCount > 1 && evaled[i].Value < MinSpecialMoveValue {
-			tmpVal = -t.alphaBeta(newDepth, -(alpha + 1), -alpha, height+1, childInCheck)
+		if reduction > 0 || (!pvNode && moveCount > 1 && evaled[i].Value < MinSpecialMoveValue) {
+			tmpVal = -t.alphaBeta(newDepth-reduction, -(alpha + 1), -alpha, height+1, childInCheck)
 			if tmpVal <= alpha {
 				continue
 			}
@@ -465,6 +474,15 @@ func sortMoves(moves []EvaledMove) {
 				moves[j] = moves[j-gap]
 			}
 			moves[j] = t
+		}
+	}
+}
+
+func init() {
+	// Init Late Move Reductions Table
+	for depth := 1; depth < 64; depth++ {
+		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
+			lmrTable[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.25)
 		}
 	}
 }
