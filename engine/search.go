@@ -166,20 +166,29 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		reduction := 0
 		moveCount++
 		childInCheck := child.IsInCheck()
-		if !inCheck && moveCount > 1 && evaled[i].Value < MinSpecialMoveValue && !evaled[i].Move.IsCaptureOrPromotion() &&
+		if !inCheck && moveCount > 1 && !evaled[i].Move.IsCaptureOrPromotion() &&
 			!childInCheck {
 			if depth >= 3 {
+				// initial value pregenerated
 				reduction := lmrTable[min(depth, 63)][min(moveCount, 63)]
 				if !pvNode {
 					reduction++
 				}
+				// smaller reduction for killer and couter moves
+				if evaled[i].Value >= MinSpecialMoveValue {
+					reduction--
+				}
+
+				// Do not reduce to quiescence
 				reduction = max(0, min(depth-2, reduction))
 			} else {
-				if moveCount >= 9+3*depth {
-					continue
-				}
-				if lazyEval.Value()+int(PawnValue.Middle)*depth <= alpha {
-					continue
+				if evaled[i].Value < MinSpecialMoveValue {
+					if moveCount >= 9+3*depth {
+						continue
+					}
+					if lazyEval.Value()+int(PawnValue.Middle)*depth <= alpha {
+						continue
+					}
 				}
 			}
 		}
@@ -464,6 +473,7 @@ func (le *lazyEval) Value() int {
 }
 
 // Gaps from Best Increments for the Average Case of Shellsort, Marcin Ciura.
+// Starting from 23, as usually there will be less moves than 57
 var shellSortGaps = [...]int{23, 10, 4, 1}
 
 func sortMoves(moves []EvaledMove) {
@@ -479,7 +489,7 @@ func sortMoves(moves []EvaledMove) {
 }
 
 func init() {
-	// Init Late Move Reductions Table
+	// Constants from ethereal
 	for depth := 1; depth < 64; depth++ {
 		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
 			lmrTable[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.25)
