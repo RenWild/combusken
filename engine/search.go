@@ -166,29 +166,22 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		reduction := 0
 		moveCount++
 		childInCheck := child.IsInCheck()
-		if !inCheck && moveCount > 1 && !evaled[i].Move.IsCaptureOrPromotion() &&
-			!childInCheck {
+		if !inCheck && moveCount > 1 && evaled[i].Value < MinSpecialMoveValue &&
+			!childInCheck && !evaled[i].Move.IsCaptureOrPromotion() {
 			if depth >= 3 {
 				// initial value pregenerated
 				reduction := lmrTable[min(depth, 63)][min(moveCount, 63)]
 				if !pvNode {
 					reduction++
 				}
-				// smaller reduction for killer and couter moves
-				if evaled[i].Value >= MinSpecialMoveValue {
-					reduction--
-				}
-
 				// Do not reduce to quiescence
 				reduction = max(0, min(depth-2, reduction))
 			} else {
-				if evaled[i].Value < MinSpecialMoveValue {
-					if moveCount >= 9+3*depth {
-						continue
-					}
-					if lazyEval.Value()+int(PawnValue.Middle)*depth <= alpha {
-						continue
-					}
+				if moveCount >= 9+3*depth {
+					continue
+				}
+				if lazyEval.Value()+int(PawnValue.Middle)*depth <= alpha {
+					continue
 				}
 			}
 		}
