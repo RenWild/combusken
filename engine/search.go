@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sync"
 
@@ -339,7 +340,7 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		// Late Move Reduction
 		// https://www.chessprogramming.org/Late_Move_Reductions
 		if depth >= 3 && !inCheck && moveCount > 1 && evaled[i].Value < MinSpecialMoveValue && !isNoisy && !childInCheck {
-			reduction = lmr(depth, moveCount)
+			reduction = lmrReductions[Min(depth, 63)][Min(moveCount, 63)]
 			reduction += BoolToInt(!pvNode)
 
 			// Increase reduction if not improving
@@ -536,13 +537,12 @@ func (t *thread) depSearch(depth, alpha, beta int, moves []EvaledMove) result {
 		childInCheck := child.IsInCheck()
 		if !inCheck && moveCount > 1 && moves[i].Value <= MinSpecialMoveValue && !moves[i].Move.IsCaptureOrPromotion() &&
 			!childInCheck {
+			if depth <= moveCountPruningDepth && moveCount >= moveCountPruning(1, depth) {
+				continue
+			}
 			if depth >= 3 {
-				reduction = lmr(depth, moveCount) - 1
+				reduction = lmrReductions[Min(depth, 63)][Min(moveCount, 63)] - 1
 				reduction = Max(0, Min(depth-2, reduction))
-			} else {
-				if moveCount >= 9+3*depth {
-					continue
-				}
 			}
 		}
 		var val int
@@ -739,15 +739,12 @@ func sortMoves(moves []EvaledMove) {
 	}
 }
 
-func lmr(d, m int) int {
-	switch {
-	case d >= 5 && m >= 16:
-		return 3
-	case d >= 4 && m >= 9:
-		return 2
-	case d >= 3 && m >= 4:
-		return 1
-	default:
-		return 0
+var lmrReductions [64][64]int
+
+func init() {
+	for depth := 1; depth < 64; depth++ {
+		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
+			lmrReductions[depth][movesPlayed] = int(math.Floor(0.625 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.2))
+		}
 	}
 }
