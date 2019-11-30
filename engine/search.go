@@ -485,7 +485,7 @@ func init() {
 	// Constants from ethereal
 	for depth := 1; depth < 64; depth++ {
 		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
-			lmrTable[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.25)
+			lmrTable[depth][movesPlayed] = int(0.8 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.0)
 		}
 	}
 }
