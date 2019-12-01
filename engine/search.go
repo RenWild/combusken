@@ -543,6 +543,8 @@ func (t *thread) depSearch(depth, alpha, beta int, moves []EvaledMove) result {
 			if depth >= 3 {
 				reduction = lmrReductions[Min(depth, 63)][Min(moveCount, 63)] - 1
 				reduction = Max(0, Min(depth-2, reduction))
+			} else if moveCount >= 9+3*depth {
+				continue
 			}
 		}
 		var val int
@@ -744,7 +746,7 @@ var lmrReductions [64][64]int
 func init() {
 	for depth := 1; depth < 64; depth++ {
 		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
-			lmrReductions[depth][movesPlayed] = int(math.Floor(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.25))
+			lmrReductions[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.25)
 		}
 	}
 }
