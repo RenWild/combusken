@@ -746,7 +746,7 @@ var lmrReductions [64][64]int
 func init() {
 	for depth := 1; depth < 64; depth++ {
 		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
-			lmrReductions[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.3)
+			lmrReductions[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.4)
 		}
 	}
 }
