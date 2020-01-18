@@ -211,7 +211,7 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 	// Null move pruning
 	if pos.LastMove != NullMove && depth >= 2 && !inCheck && (!hashOk || (hashFlag&TransAlpha == 0) || int(hashValue) >= beta) && !IsLateEndGame(pos) && int(t.stack[height].Evaluation()) >= beta {
 		pos.MakeNullMove(child)
-		reduction := depth / 4 + 3 + Min(int(t.stack[height].Evaluation()) - beta, 384) / 128
+		reduction := depth/4 + 3 + Min(int(t.stack[height].Evaluation())-beta, 384)/128
 		tmpVal = -t.alphaBeta(depth-reduction, -beta, -beta+1, height+1, child.IsInCheck())
 		if tmpVal >= beta {
 			return beta
@@ -771,7 +771,7 @@ var lmrReductions [64][64]int
 func init() {
 	for depth := 1; depth < 64; depth++ {
 		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
-			lmrReductions[depth][movesPlayed] = int(0.7 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.2)
+			lmrReductions[depth][movesPlayed] = int(0.75 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.1)
 		}
 	}
 }
