@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sync"
 
@@ -349,7 +350,8 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		// Late Move Reduction
 		// https://www.chessprogramming.org/Late_Move_Reductions
 		if depth >= 3 && !inCheck && moveCount > 1 && !isNoisy && !childInCheck {
-			reduction = lmr(depth, moveCount)
+			reduction = lmrReductions[Min(depth, 63)][Min(moveCount, 63)]
+
 			reduction += BoolToInt(!pvNode)
 
 			// less reudction for special moves
@@ -761,5 +763,15 @@ func lmr(d, m int) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+var lmrReductions [64][64]int
+
+func init() {
+	for depth := 1; depth < 64; depth++ {
+		for movesPlayed := 1; movesPlayed < 64; movesPlayed++ {
+			lmrReductions[depth][movesPlayed] = int(0.7 + math.Log(float64(depth))*math.Log(float64(movesPlayed))/2.2)
+		}
 	}
 }
