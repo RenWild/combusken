@@ -851,7 +851,7 @@ var lmrTable [64][64]uint8
 func init() {
 	for d := 1; d < 64; d++ {
 		for m := 1; d < 64; d++ {
-			lmrTable[d][m] = uint8(math.Log(float64(d))*math.Log(float64(m))/2.1 + 0.734)
+			lmrTable[d][m] = uint8(math.Log(float64(d))*math.Log(float64(m))/2.25 + 0.734)
 		}
 	}
 }
