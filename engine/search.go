@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sync"
 
@@ -845,15 +846,16 @@ func sortMoves(moves []EvaledMove) {
 	}
 }
 
-func lmr(d, m int) int {
-	switch {
-	case d >= 5 && m >= 16:
-		return 3
-	case d >= 4 && m >= 9:
-		return 2
-	case d >= 3 && m >= 4:
-		return 1
-	default:
-		return 0
+var lmrTable [64][64]uint8
+
+func init() {
+	for d := 1; d < 64; d++ {
+		for m := 1; d < 64; d++ {
+			lmrTable[d][m] = uint8(math.Log(float64(d))*math.Log(float64(m))/1.93 + 0.734)
+		}
 	}
+}
+
+func lmr(d, m int) int {
+	return int(lmrTable[Min(d, 63)][Min(m, 63)])
 }
