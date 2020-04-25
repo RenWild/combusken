@@ -40,6 +40,7 @@ var SkipSize = []int{1, 1, 1, 2, 2, 2, 1, 3, 2, 2, 1, 3, 3, 2, 2, 1}
 var SkipDepths = []int{1, 2, 2, 4, 4, 3, 2, 5, 4, 3, 2, 6, 5, 4, 3, 2}
 
 var PawnValueMiddle = PawnValue.Middle()
+var EndPieceValues = [...]int16{PawnValue.End(), KnightValue.End(), BishopValue.End(), RookValue.End(), QueenValue.End(), 0, 0}
 
 func lossIn(height int) int {
 	return -Mate + height
@@ -406,7 +407,7 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 
 		// Late Move Reduction
 		// https://www.chessprogramming.org/Late_Move_Reductions
-		if depth >= 3 && !inCheck && moveCount > 1 && !isNoisy && !childInCheck {
+		if depth >= 3 && !inCheck && moveCount > 1 && !childInCheck && (!isNoisy || (!evaled[i].IsPromotion() && int(EndPieceValues[evaled[i].CapturedPiece()]+t.stack[height].Evaluation()) < alpha)) {
 			reduction = lmr(depth, moveCount)
 			reduction += BoolToInt(!pvNode)
 
