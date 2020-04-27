@@ -25,6 +25,10 @@ func (mv *MoveEvaluator) ResetKillers(height int) {
 	mv.KillerMoves[height][1] = NullMove
 }
 
+func (mv *MoveEvaluator) CounterHistoryValue(lastMove Move, move Move) int {
+	return mv.CounterHistory[lastMove.MovedPiece()][lastMove.To()][move.MovedPiece()][move.To()]
+}
+
 func (mv *MoveEvaluator) SetCurrentMove(height int, move Move) {
 	mv.CurrentMove[height] = move
 }
