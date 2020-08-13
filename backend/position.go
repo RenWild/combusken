@@ -41,14 +41,16 @@ type Position struct {
 
 var InitialPosition Position = ParseFen(InitialPositionFen)
 
-var rookCastleFlags [64]uint8
+var castleFlags [64]uint8
 
 func init() {
 	HashPosition(&InitialPosition)
-	rookCastleFlags[A1] = WhiteQueenSideCastleFlag
-	rookCastleFlags[H1] = WhiteKingSideCastleFlag
-	rookCastleFlags[H8] = BlackKingSideCastleFlag
-	rookCastleFlags[A8] = BlackQueenSideCastleFlag
+	castleFlags[A1] = WhiteQueenSideCastleFlag
+	castleFlags[H1] = WhiteKingSideCastleFlag
+	castleFlags[E1] = WhiteQueenSideCastleFlag | WhiteKingSideCastleFlag
+	castleFlags[H8] = BlackKingSideCastleFlag
+	castleFlags[A8] = BlackQueenSideCastleFlag
+	castleFlags[E8] = BlackQueenSideCastleFlag | BlackKingSideCastleFlag
 }
 
 func (pos *Position) TypeOnSquare(squareBB uint64) int {
@@ -68,21 +70,14 @@ func (pos *Position) TypeOnSquare(squareBB uint64) int {
 	return None
 }
 
-var kingCastleFlags = [2]uint8{BlackKingSideCastleFlag | BlackQueenSideCastleFlag, WhiteKingSideCastleFlag | WhiteQueenSideCastleFlag}
-
 func (p *Position) MovePiece(piece, side, from, to int) {
 	var b = SquareMask[from] ^ SquareMask[to]
 	p.Colours[side] ^= b
 	p.Pieces[piece] ^= b
 	p.Key ^= zobrist[piece][side][from] ^ zobrist[piece][side][to]
-	switch piece {
-	case King:
-		p.Flags |= kingCastleFlags[side]
-		fallthrough
-	case Pawn:
+	p.Flags |= castleFlags[from] | castleFlags[to]
+	if piece == King || piece == Pawn {
 		p.PawnKey ^= zobrist[piece][side][from] ^ zobrist[piece][side][to]
-	case Rook:
-		p.Flags |= rookCastleFlags[from]
 	}
 }
 
@@ -91,14 +86,9 @@ func (p *Position) TogglePiece(piece, side, square int) {
 	p.Colours[side] ^= b
 	p.Pieces[piece] ^= b
 	p.Key ^= zobrist[piece][side][square]
-	switch piece {
-	// Commented out as this function should not be called with King
-	//case King:
-	//fallthrough
-	case Pawn:
+	p.Flags |= castleFlags[square]
+	if piece == Pawn {
 		p.PawnKey ^= zobrist[Pawn][side][square]
-	case Rook:
-		p.Flags |= rookCastleFlags[square]
 	}
 }
 
@@ -218,9 +208,10 @@ func (pos *Position) Print() {
 
 func (p *Position) MakeMoveLAN(lan string) (Position, bool) {
 	var buffer [256]EvaledMove
-	var ml = p.GenerateAllMoves(buffer[:])
-	for i := range ml {
-		var mv = ml[i].Move
+	noisySize := GenerateNoisy(p, buffer[:])
+	quietsSize := GenerateQuiet(p, buffer[noisySize:])
+	for i := range buffer[:noisySize+quietsSize] {
+		var mv = buffer[i].Move
 		if strings.EqualFold(mv.String(), lan) {
 			var newPosition = Position{}
 			if p.MakeMove(mv, &newPosition) {
@@ -231,19 +222,6 @@ func (p *Position) MakeMoveLAN(lan string) (Position, bool) {
 		}
 	}
 	return Position{}, false
-}
-
-func (pos *Position) GenerateAllLegalMoves() []EvaledMove {
-	var buffer [256]EvaledMove
-	var moves = pos.GenerateAllMoves(buffer[:])
-	var child Position
-	result := make([]EvaledMove, 0)
-	for _, move := range moves {
-		if pos.MakeMove(move.Move, &child) {
-			result = append(result, move)
-		}
-	}
-	return result
 }
 
 func (pos *Position) MakeLegalMove(move Move, res *Position) {
@@ -276,9 +254,6 @@ func (pos *Position) MakeLegalMove(move Move, res *Position) {
 			res.Key ^= zobristEpSquare[move.To()]
 		case Capture:
 			res.TogglePiece(move.CapturedPiece(), pos.SideToMove^1, move.To())
-			if move.CapturedPiece() == Rook {
-				res.Flags |= rookCastleFlags[move.To()]
-			}
 		case KingCastle:
 			if pos.SideToMove == White {
 				res.MovePiece(Rook, White, H1, F1)
@@ -299,9 +274,6 @@ func (pos *Position) MakeLegalMove(move Move, res *Position) {
 		res.TogglePiece(move.PromotedPiece(), pos.SideToMove, move.To())
 		if move.IsCapture() {
 			res.TogglePiece(move.CapturedPiece(), pos.SideToMove^1, move.To())
-			if move.CapturedPiece() == Rook {
-				res.Flags |= rookCastleFlags[move.To()]
-			}
 		}
 	}
 
@@ -318,7 +290,8 @@ func (pos *Position) IsMovePseudoLegal(move Move) bool {
 	toMask := SquareMask[move.To()]
 
 	if move == NullMove || (we&fromMask) == 0 ||
-		(move.IsCapture() && (move.CapturedPiece() >= King || (move.Type() != EPCapture && pos.Pieces[move.CapturedPiece()]&them&toMask == 0))) {
+		(move.IsCapture() && (move.CapturedPiece() >= King || (move.Type() != EPCapture && pos.Pieces[move.CapturedPiece()]&them&toMask == 0))) ||
+		(!move.IsCapture() && toMask&them != 0) {
 		return false
 	}
 

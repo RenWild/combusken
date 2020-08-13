@@ -1,13 +1,17 @@
 package engine
 
-import "context"
-import "errors"
-import "runtime"
-import "github.com/mhib/combusken/backend"
-import "github.com/mhib/combusken/evaluation"
-import "github.com/mhib/combusken/transposition"
-import "github.com/mhib/combusken/fathom"
-import . "github.com/mhib/combusken/utils"
+import (
+	"context"
+	"errors"
+	"runtime"
+
+	"github.com/mhib/combusken/backend"
+	"github.com/mhib/combusken/evaluation"
+	"github.com/mhib/combusken/fathom"
+	"github.com/mhib/combusken/transposition"
+
+	. "github.com/mhib/combusken/utils"
+)
 
 const MAX_HEIGHT = 127
 const STACK_SIZE = MAX_HEIGHT + 1
@@ -32,7 +36,7 @@ type Engine struct {
 
 type thread struct {
 	engine *Engine
-	MoveEvaluator
+	MoveHistory
 	nodes int
 	stack [STACK_SIZE]StackEntry
 }
@@ -53,31 +57,28 @@ func newUciScore(score int) UciScore {
 }
 
 type SearchInfo struct {
-	Score UciScore
-	Depth int
-	Nodes int
-	Moves []backend.Move
+	Score    UciScore
+	Depth    int
+	Nodes    int
+	Nps      int
+	Duration int
+	Moves    []backend.Move
 }
 
 type StackEntry struct {
-	position backend.Position
+	MoveProvider
 	PV
-	moves                [MAX_MOVES]backend.EvaledMove
-	quietsSearched       [MAX_MOVES]backend.Move
-	evaluation           int16
-	evaluationCalculated bool
+	quietsSearched [MAX_MOVES]backend.Move
+	position       backend.Position
+	evaluation     int16
 }
 
-func (se *StackEntry) InvalidateEvaluation() {
-	se.evaluationCalculated = false
+func (t *thread) getEvaluation(height int) int16 {
+	return t.stack[height].evaluation
 }
 
-func (se *StackEntry) Evaluation() int16 {
-	if !se.evaluationCalculated {
-		se.evaluation = int16(evaluation.Evaluate(&se.position))
-		se.evaluationCalculated = true
-	}
-	return se.evaluation
+func (t *thread) setEvaluation(height int, eval int16) {
+	t.stack[height].evaluation = eval
 }
 
 type PV struct {
@@ -105,7 +106,7 @@ type SearchParams struct {
 }
 
 func (e *Engine) GetInfo() (name, version, author string) {
-	return "Combusken", "1.1.1", "Marcin Henryk Bartkowiak"
+	return "Combusken", "1.3.0-TCEC19", "Marcin Henryk Bartkowiak"
 }
 
 func (e *Engine) GetOptions() []EngineOption {
@@ -158,10 +159,10 @@ func (e *Engine) NewGame() {
 	transposition.GlobalTransTable = transposition.NewTransTable(e.Hash.Val)
 	e.threads = make([]thread, e.Threads.Val)
 	for i := range e.threads {
-		e.threads[i].MoveEvaluator = MoveEvaluator{}
+		e.threads[i].MoveHistory = MoveHistory{}
 		e.threads[i].engine = e
 	}
-	transposition.GlobalPawnKingTable = transposition.NewPKTable(e.PawnHash.Val)
+	evaluation.GlobalPawnKingTable = evaluation.NewPawnKingTable(e.PawnHash.Val)
 	fathom.MIN_PROBE_DEPTH = e.SyzygyProbeDepth.Val
 	if e.SyzygyPath.Dirty {
 		fathom.SetPath(e.SyzygyPath.Val)
@@ -186,6 +187,10 @@ func (t *thread) incNodes() {
 		default:
 		}
 	}
+}
+
+func (t *thread) getNextMove(pos *backend.Position, depth, height int) backend.Move {
+	return t.stack[height].GetNextMove(pos, &t.MoveHistory, depth, height)
 }
 
 func (pv *PV) clear() {

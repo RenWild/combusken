@@ -54,6 +54,8 @@ const (
 	BLACK_QUEEN_CASTLE_BLOCK_BB uint64 = B8_BB | C8_BB | D8_BB
 
 	PROMOTION_RANKS uint64 = RANK_1_BB | RANK_8_BB
+	CENTER          uint64 = (FILE_D_BB | FILE_E_BB) & (RANK_4_BB | RANK_5_BB)
+	LONG_DIAGONALS  uint64 = 0x8142241818244281
 )
 
 var RANKS = [...]uint64{RANK_1_BB, RANK_2_BB, RANK_3_BB, RANK_4_BB, RANK_5_BB, RANK_6_BB, RANK_7_BB, RANK_8_BB}
@@ -61,6 +63,10 @@ var FILES = [...]uint64{FILE_A_BB, FILE_B_BB, FILE_C_BB, FILE_D_BB, FILE_E_BB, F
 
 func File(id int) int {
 	return id & 7
+}
+
+func FileBB(id int) uint64 {
+	return FILES[File(id)]
 }
 
 func Rank(id int) int {
@@ -240,6 +246,10 @@ func MostSignificantBit(bb uint64) int {
 
 func MoreThanOne(bb uint64) bool {
 	return bb != 0 && ((bb-1)&bb) != 0
+}
+
+func OnlyOne(bb uint64) bool {
+	return bb != 0 && ((bb-1)&bb) == 0
 }
 
 func NorthWest(set uint64) uint64 {

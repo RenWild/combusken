@@ -10,7 +10,7 @@ type Trace struct {
 	QueenValue                   int
 	PieceScores                  [King + 1][8][4]int
 	PawnScores                   [7][8]int
-	PawnsConnected               [8][4]int
+	PawnsConnected               [7][4]int
 	MobilityBonus                [4][32]int
 	PassedFriendlyDistance       [8]int
 	PassedEnemyDistance          [8]int
@@ -25,12 +25,13 @@ type Trace struct {
 	BishopRammedPawns            int
 	BishopOutpostUndefendedBonus int
 	BishopOutpostDefendedBonus   int
+	LongDiagonalBishop           int
 	KnightOutpostUndefendedBonus int
 	KnightOutpostDefendedBonus   int
 	DistantKnight                [4]int
 	MinorBehindPawn              int
-	Tempo                        int
 	RookOnFile                   [2]int
+	RookOnQueenFile              int
 	KingDefenders                [12]int
 	KingShelter                  [2][8][8]int
 	KingStorm                    [2][4][8]int

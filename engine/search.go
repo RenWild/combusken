@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"math/rand"
-	"sync"
 
 	. "github.com/mhib/combusken/backend"
 	. "github.com/mhib/combusken/evaluation"
@@ -27,6 +26,11 @@ const reverseFutilityPruningMargin = 90
 
 const moveCountPruningDepth = 8
 const futilityPruningDepth = 8
+const counterMovePruningDepth = 3
+const counterMovePruningVal = -1000
+
+const probCutDepth = 6
+const probCutMargin = 100
 
 const SMPCycles = 16
 
@@ -35,9 +39,6 @@ const WindowDepth = 6
 
 const QSDepthChecks = 0
 const QSDepthNoChecks = -1
-
-var SkipSize = []int{1, 1, 1, 2, 2, 2, 1, 3, 2, 2, 1, 3, 3, 2, 2, 1}
-var SkipDepths = []int{1, 2, 2, 4, 4, 3, 2, 5, 4, 3, 2, 6, 5, 4, 3, 2}
 
 var PawnValueMiddle = PawnValue.Middle()
 
@@ -72,12 +73,12 @@ func (t *thread) quiescence(depth, alpha, beta, height int, inCheck bool) int {
 	} else {
 		ttDepth = QSDepthNoChecks
 	}
-	hashOk, hashValue, hashDepth, hashMove, hashFlag := transposition.GlobalTransTable.Get(pos.Key)
-	if hashOk && int(hashDepth) >= ttDepth {
-		tmpHashValue := int(transposition.ValueFromTrans(hashValue, height))
-		if hashFlag == TransExact || (hashFlag == TransAlpha && tmpHashValue <= alpha) ||
-			(hashFlag == TransBeta && tmpHashValue >= beta) {
-			return tmpHashValue
+	hashOk, hashValue, hashEval, hashDepth, hashMove, hashFlag := transposition.GlobalTransTable.Get(pos.Key)
+	if hashOk && hashValue != UnknownValue && int(hashDepth) >= ttDepth {
+		hashValue = transposition.ValueFromTrans(hashValue, height)
+		if hashFlag == TransExact || (hashFlag == TransAlpha && int(hashValue) <= alpha) ||
+			(hashFlag == TransBeta && int(hashValue) >= beta) {
+			return int(hashValue)
 		}
 	}
 
@@ -87,45 +88,72 @@ func (t *thread) quiescence(depth, alpha, beta, height int, inCheck bool) int {
 
 	moveCount := 0
 
-	val := Evaluate(pos)
+	var bestVal int
+	var eval int16
 
-	var evaled []EvaledMove
 	if inCheck {
-		evaled = pos.GenerateAllMoves(t.stack[height].moves[:])
+		bestVal = MinInt
+		t.stack[height].InitNormal(pos, &t.MoveHistory, height, hashMove)
+		eval = UnknownValue
 	} else {
+		if hashOk && hashEval != UnknownValue {
+			eval = hashEval
+			bestVal = int(eval)
+			if hashValue != UnknownValue {
+				requiredFlag := uint8(TransAlpha)
+				if int(hashValue) > bestVal {
+					requiredFlag = uint8(TransBeta)
+				}
+				if requiredFlag&hashFlag != 0 {
+					bestVal = int(hashValue)
+				}
+			}
+		} else {
+			if pos.LastMove != NullMove {
+				eval = int16(Evaluate(pos))
+			} else {
+				eval = -t.getEvaluation(height-1) + 2*Tempo
+			}
+			bestVal = int(eval)
+			transposition.GlobalTransTable.Set(pos.Key, UnknownValue, eval, transposition.NoneDepth, NullMove, TransNone)
+		}
 		// Early return if not in check and evaluation exceeded beta
-		if val >= beta {
+		if bestVal >= beta {
 			return beta
 		}
-		if alpha < val {
-			alpha = val
+		if alpha < bestVal {
+			alpha = bestVal
 		}
-		evaled = pos.GenerateAllCaptures(t.stack[height].moves[:])
+		t.stack[height].InitQs()
 	}
 
-	t.EvaluateQsMoves(pos, evaled, hashMove, inCheck)
-
-	for i := range evaled {
-		maxMoveToFirst(evaled[i:])
-		// Ignore move with negative SEE unless in check
-		if (!inCheck && !SeeSign(pos, evaled[i].Move)) || !pos.MakeMove(evaled[i].Move, child) {
+	for {
+		move := t.getNextMove(pos, 0, height)
+		if move == NullMove {
+			break
+		}
+		if !pos.MakeMove(move, child) {
 			continue
 		}
 
 		// Prefetch as early as possible
 		transposition.GlobalTransTable.Prefetch(child.Key)
 
-		t.SetCurrentMove(height, evaled[i].Move)
+		t.SetCurrentMove(height, move)
 		moveCount++
 		childInCheck := child.IsInCheck()
-		val = -t.quiescence(depth-1, -beta, -alpha, height+1, childInCheck)
-		if val > alpha {
-			alpha = val
-			bestMove = evaled[i].Move
-			if val >= beta {
-				break
+		val := -t.quiescence(depth-1, -beta, -alpha, height+1, childInCheck)
+		if val > bestVal {
+			bestVal = val
+			bestMove = move
+			if val > alpha {
+				alpha = val
+				if val >= beta {
+					break
+				}
+				t.stack[height].PV.assign(move, &t.stack[height+1].PV)
 			}
-			t.stack[height].PV.assign(evaled[i].Move, &t.stack[height+1].PV)
+
 		}
 	}
 
@@ -142,7 +170,7 @@ func (t *thread) quiescence(depth, alpha, beta, height int, inCheck bool) int {
 		flag = TransExact
 	}
 
-	transposition.GlobalTransTable.Set(pos.Key, transposition.ValueToTrans(alpha, height), ttDepth, bestMove, flag)
+	transposition.GlobalTransTable.Set(pos.Key, transposition.ValueToTrans(alpha, height), eval, ttDepth, bestMove, flag)
 
 	return alpha
 }
@@ -153,16 +181,6 @@ func (t *thread) contempt(pos *Position, depth int) int {
 		return 0
 	}
 	return 2*(t.nodes&1) - 1
-}
-
-func maxMoveToFirst(moves []EvaledMove) {
-	maxIdx := 0
-	for i := 1; i < len(moves); i++ {
-		if moves[i].Value > moves[maxIdx].Value {
-			maxIdx = i
-		}
-	}
-	moves[0], moves[maxIdx] = moves[maxIdx], moves[0]
 }
 
 func moveToFirst(moves []EvaledMove, move Move) {
@@ -178,7 +196,7 @@ func moveCountPruning(improving, depth int) int {
 	return (5+depth*depth)*(1+improving)/2 - 1
 }
 
-func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
+func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool, cutNode bool) int {
 	t.incNodes()
 	t.stack[height].PV.clear()
 
@@ -188,32 +206,31 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		return t.contempt(pos, depth)
 	}
 
-	var tmpVal int
-
 	// Node is not pv if it is searched with null window
 	pvNode := alpha != beta-1
 
 	// Mate distance pruning
-	alpha = Max(lossIn(height), alpha)
-	beta = Min(winIn(height+1), beta)
+	alpha = Max(lossIn(height+1), alpha)
+	beta = Min(winIn(height+2), beta)
 	if alpha >= beta {
 		return alpha
 	}
 
 	alphaOrig := alpha
-	hashOk, hashValue, hashDepth, hashMove, hashFlag := transposition.GlobalTransTable.Get(pos.Key)
-	hashValue = transposition.ValueFromTrans(hashValue, height)
-	if hashOk {
-		tmpVal = int(hashValue)
+	hashOk, hashValue, hashEval, hashDepth, hashMove, hashFlag := transposition.GlobalTransTable.Get(pos.Key)
+	var val int
+	if hashOk && hashValue != UnknownValue {
+		hashValue = transposition.ValueFromTrans(hashValue, height)
+		val := int(hashValue)
 		// Hash pruning
 		if hashDepth >= int16(depth) && (depth == 0 || !pvNode) {
 			if hashFlag == TransExact {
-				return tmpVal
+				return val
 			}
-			if hashFlag == TransAlpha && tmpVal <= alpha {
+			if hashFlag == TransAlpha && val <= alpha {
 				return alpha
 			}
-			if hashFlag == TransBeta && tmpVal >= beta {
+			if hashFlag == TransBeta && val >= beta {
 				return beta
 			}
 		}
@@ -224,18 +241,18 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		if tbResult := fathom.ProbeWDL(pos, depth); tbResult != fathom.TB_RESULT_FAILED {
 			var ttBound int
 			if tbResult == fathom.TB_LOSS {
-				tmpVal = ValueLoss + height + 1
+				val = ValueLoss + height + 1
 				ttBound = TransAlpha
 			} else if tbResult == fathom.TB_WIN {
-				tmpVal = ValueWin - height - 1
+				val = ValueWin - height - 1
 				ttBound = TransBeta
 			} else {
-				tmpVal = 0
+				val = 0
 				ttBound = TransExact
 			}
-			if ttBound == TransExact || ttBound == TransBeta && tmpVal >= beta || ttBound == TransAlpha && tmpVal <= alpha {
-				transposition.GlobalTransTable.Set(pos.Key, int16(tmpVal), MAX_HEIGHT-1, NullMove, ttBound)
-				return tmpVal
+			if ttBound == TransExact || ttBound == TransBeta && val >= beta || ttBound == TransAlpha && val <= alpha {
+				transposition.GlobalTransTable.Set(pos.Key, int16(val), UnknownValue, MAX_HEIGHT, NullMove, ttBound)
+				return val
 			}
 		}
 	}
@@ -246,26 +263,101 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		return t.quiescence(0, alpha, beta, height, inCheck)
 	}
 
-	t.stack[height].InvalidateEvaluation()
-	t.MoveEvaluator.ResetKillers(height + 1)
+	t.ResetKillers(height + 1)
+	var improving bool
+	var eval int16
+	if inCheck {
+		improving = false
+		eval = UnknownValue
+		t.setEvaluation(height, eval)
+		goto afterPreMovesPruning
+	} else if hashOk && hashEval != UnknownValue {
+		eval = hashEval
+		t.setEvaluation(height, hashEval)
+		// Idea from stockfish
+		// Use hashValue as better position evaluation
+		if hashValue != UnknownValue {
+			requiredFlag := TransAlpha
+			if hashValue > eval {
+				requiredFlag = TransBeta
+			}
+			if requiredFlag&int(hashFlag) != 0 {
+				eval = hashValue
+			}
+		}
+	} else {
+		if pos.LastMove != NullMove {
+			eval = int16(Evaluate(pos))
+		} else {
+			eval = -t.getEvaluation(height-1) + 2*Tempo
+		}
+		t.setEvaluation(height, eval)
+		transposition.GlobalTransTable.Set(pos.Key, UnknownValue, eval, transposition.NoneDepth, NullMove, TransNone)
+	}
+
+	if height > 1 {
+		if t.getEvaluation(height-2) != UnknownValue {
+			improving = t.getEvaluation(height) > t.getEvaluation(height-2)
+		} else {
+			improving = height <= 3 ||
+				t.getEvaluation(height-4) == UnknownValue ||
+				t.getEvaluation(height) > t.getEvaluation(height-4)
+		}
+	} else {
+		improving = true
+	}
 
 	// Reverse futility pruning
-	if !pvNode && depth < reverseFutilityPruningDepth && int(t.stack[height].Evaluation())-reverseFutilityPruningMargin*depth >= beta && int(t.stack[height].Evaluation()) < ValueWin {
-		return int(t.stack[height].Evaluation())
+	if !pvNode && depth < reverseFutilityPruningDepth && int(eval)-reverseFutilityPruningMargin*depth >= beta && int(eval) < ValueWin {
+		return int(eval)
 	}
 
 	// Null move pruning
-	if pos.LastMove != NullMove && depth >= 2 && !inCheck && (height < 2 || t.GetPreviousMoveFromCurrentSide(height) != NullMove) && (!hashOk || (hashFlag&TransAlpha == 0) || int(hashValue) >= beta) && !IsLateEndGame(pos) && int(t.stack[height].Evaluation()) >= beta {
+	if !pvNode && pos.LastMove != NullMove && depth >= 2 && (height < 2 || t.GetPreviousMoveFromCurrentSide(height) != NullMove) && (!hashOk || (hashFlag&TransAlpha == 0) || int(hashValue) >= beta) && !IsLateEndGame(pos) && int(eval) >= beta {
 		pos.MakeNullMove(child)
-		t.MoveEvaluator.CurrentMove[height] = NullMove
-		reduction := depth/4 + 3 + Min(int(t.stack[height].Evaluation())-beta, 384)/128
-		tmpVal = -t.alphaBeta(depth-reduction, -beta, -beta+1, height+1, false)
-		if tmpVal >= beta {
+		t.CurrentMove[height] = NullMove
+		reduction := depth/4 + 3 + Min(int(eval)-beta, 384)/128
+		val = -t.alphaBeta(depth-reduction, -beta, -beta+1, height+1, false, !cutNode)
+		if val >= beta {
 			return beta
 		}
 	}
 
-	val := MinInt
+	// Probcut pruning
+	// If we have a good enough capture and a reduced search returns a value
+	// much above beta, we can (almost) safely prune the previous move.
+	if !pvNode && depth >= probCutDepth && Abs(beta) < ValueWin {
+		rBeta := Min(beta+probCutMargin, ValueWin-1)
+		//Idea from stockfish
+		if !(hashMove != NullMove && int(hashDepth) >= depth-4 && int(hashValue) < rBeta) {
+			t.stack[height].InitQs()
+			probCutCount := 0
+			for probCutCount < 3 {
+
+				move := t.getNextMove(pos, depth, height)
+				if move == NullMove {
+					break
+				}
+				if !pos.MakeMove(move, child) {
+					continue
+				}
+
+				probCutCount++
+				t.SetCurrentMove(height, move)
+				isChildInCheck := child.IsInCheck()
+				val = -t.quiescence(0, -rBeta, -rBeta+1, height+1, isChildInCheck)
+				if val >= rBeta {
+					val = -t.alphaBeta(depth-4, -rBeta, -rBeta+1, height+1, isChildInCheck, !cutNode)
+				}
+				if val >= rBeta {
+					return val
+				}
+			}
+		}
+	}
+
+afterPreMovesPruning:
+	bestVal := MinInt
 
 	// Internal iterative deepening
 	// https://www.chessprogramming.org/Internal_Iterative_Deepening
@@ -277,189 +369,114 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		} else {
 			iiDepth = (depth - 5) / 2
 		}
-		t.alphaBeta(iiDepth, alpha, beta, height, inCheck)
-		_, _, _, hashMove, _ = transposition.GlobalTransTable.Get(pos.Key)
+		t.alphaBeta(iiDepth, alpha, beta, height, inCheck, cutNode)
+		_, _, _, _, hashMove, _ = transposition.GlobalTransTable.Get(pos.Key)
 	}
 
 	// Quiet moves are stored in order to reduce their history value at the end of search
 	quietsSearched := t.stack[height].quietsSearched[:0]
 	bestMove := NullMove
 	moveCount := 0
-	movesSorted := false
-	hashMoveChecked := false
 	seeMargins := [2]int{seeQuietMargin * depth, seeNoisyMargin * depth * depth}
-	var evaled []EvaledMove
+	t.stack[height].InitNormal(pos, &t.MoveHistory, height, hashMove)
 
-	// Check hashMove before move generation
-	if pos.IsMovePseudoLegal(hashMove) {
-		hashMoveChecked = true
-		if pos.MakeMove(hashMove, child) {
-			moveCount++
-			childInCheck := child.IsInCheck()
-			newDepth := depth - 1
-
-			// Prefetch as early as possible
-			transposition.GlobalTransTable.Prefetch(child.Key)
-
-			// Castling extension
-			if hashMove.IsCastling() {
-				newDepth++
-				// Check extension
-				// Moves with positive SEE and gives check are searched with increased depth
-			} else if inCheck && SeeSign(pos, hashMove) {
-				newDepth++
-				// Singular extension
-				// https://www.chessprogramming.org/Singular_Extensions
-			} else if depth >= 8 && int(hashDepth) >= depth-2 && hashFlag != TransAlpha {
-				evaled = pos.GenerateAllMoves(t.stack[height].moves[:])
-				t.EvaluateMoves(pos, evaled, hashMove, height, depth)
-				sortMoves(evaled)
-				movesSorted = true
-				evaled = evaled[1:]
-				if t.isMoveSingular(depth, height, hashMove, int(hashValue), evaled) {
-					newDepth++
-				}
-			}
-
-			// Store move if it is quiet
-			if !hashMove.IsCaptureOrPromotion() {
-				quietsSearched = append(quietsSearched, hashMove)
-			}
-
-			t.SetCurrentMove(height, hashMove)
-
-			tmpVal = -t.alphaBeta(newDepth, -beta, -alpha, height+1, childInCheck)
-
-			if tmpVal > val {
-				val = tmpVal
-				if val > alpha {
-					alpha = val
-					bestMove = hashMove
-					if alpha >= beta {
-						goto afterLoop
-					}
-					t.stack[height].PV.assign(hashMove, &t.stack[height+1].PV)
-				}
-			}
+	for {
+		move := t.getNextMove(pos, depth, height)
+		if move == NullMove {
+			break
 		}
-	}
+		isNoisy := move.IsCaptureOrPromotion()
 
-	// Generate moves if not generated in hashMove Check
-	if !movesSorted {
-		evaled = pos.GenerateAllMoves(t.stack[height].moves[:])
-		if hashMoveChecked {
-			moveToFirst(evaled, hashMove)
-			evaled = evaled[1:] // Ignore hash move
-		}
-		t.EvaluateMoves(pos, evaled, hashMove, height, depth)
-	}
-
-	for i := range evaled {
-		// Move might have been already sorted if singularity have been checked
-		if !movesSorted {
-			// Sort first few moves with selection sort
-			if i < 3 || len(evaled)-i < 3 {
-				maxIdx := i
-				for idx := i + 1; idx < len(evaled); idx++ {
-					if evaled[idx].Value > evaled[maxIdx].Value {
-						maxIdx = idx
-					}
-				}
-				evaled[i], evaled[maxIdx] = evaled[maxIdx], evaled[i]
-			} else {
-				// Sort rest of moves with shell sort
-				sortMoves(evaled[i:])
-				movesSorted = true
-			}
-		}
-		isNoisy := evaled[i].Move.IsCaptureOrPromotion()
-
-		if val > ValueLoss && !inCheck && moveCount > 0 && evaled[i].Value < MinSpecialMoveValue && !isNoisy {
-			if depth <= futilityPruningDepth && int(t.stack[height].Evaluation())+int(PawnValueMiddle)*depth <= alpha {
+		if bestVal > ValueLoss && !inCheck && moveCount > 0 && t.stack[height].GetMoveStage() > GENERATE_QUIET && !isNoisy {
+			if depth <= futilityPruningDepth && int(eval)+int(PawnValueMiddle)*depth <= alpha {
 				continue
 			}
-			if depth <= moveCountPruningDepth && moveCount >= moveCountPruning(BoolToInt(height <= 2 || t.stack[height].Evaluation() >= t.stack[height-2].Evaluation()), depth) {
+			if depth <= moveCountPruningDepth && moveCount >= moveCountPruning(BoolToInt(improving), depth) {
+				continue
+			}
+			if depth <= counterMovePruningDepth && pos.LastMove != NullMove && t.CounterHistoryValue(pos.LastMove, move) < counterMovePruningVal {
 				continue
 			}
 		}
 
-		if val > ValueLoss &&
+		if bestVal > ValueLoss &&
 			depth <= seePruningDepth &&
 			moveCount > 0 &&
-			evaled[i].Value < MinGoodCapture &&
-			!SeeAbove(pos, evaled[i].Move, seeMargins[BoolToInt(isNoisy)]) {
+			t.stack[height].GetMoveStage() > GOOD_NOISY &&
+			!SeeAbove(pos, move, seeMargins[BoolToInt(isNoisy)]) {
 			continue
 		}
 
-		if !pos.MakeMove(evaled[i].Move, child) {
+		if !pos.MakeMove(move, child) {
 			continue
 		}
 
-		t.SetCurrentMove(height, evaled[i].Move)
+		t.SetCurrentMove(height, move)
 
 		// Prefetch as early as possible
 		transposition.GlobalTransTable.Prefetch(child.Key)
 
 		moveCount++
 		childInCheck := child.IsInCheck()
-		reduction := 0
 
+		reduction := 0
 		// Late Move Reduction
 		// https://www.chessprogramming.org/Late_Move_Reductions
 		if depth >= 3 && !inCheck && moveCount > 1 && !isNoisy && !childInCheck {
 			reduction = lmr(depth, moveCount)
 			reduction += BoolToInt(!pvNode)
+			reduction += BoolToInt(cutNode) * 2
 
-			// less reudction for special moves
-			reduction -= BoolToInt(evaled[i].Value >= MinSpecialMoveValue)
+			// less reduction for special moves
+			reduction -= BoolToInt(t.stack[height].GetMoveStage() < GENERATE_QUIET)
 
 			// Increase reduction if not improving
-			reduction += BoolToInt(height <= 2 || t.stack[height].Evaluation() < t.stack[height-2].Evaluation())
+			reduction += BoolToInt(!improving)
 			reduction = Max(0, Min(depth-2, reduction))
 		}
-		newDepth := depth - 1
 
-		// Castling extension
-		if evaled[i].IsCastling() {
-			newDepth++
+		extension := BoolToInt(
+			// Castling extension
+			move.IsCastling() ||
+				// Check extension
+				(inCheck && SeeSign(pos, move)) ||
+				// singular extension
+				(move == hashMove && depth >= 8 && int(hashDepth) >= depth-2 && hashFlag != TransAlpha) &&
+					t.isMoveSingular(depth, height, hashMove, int(hashValue), cutNode))
 
-			// Check extension
-			// Moves with positive SEE and gives check are searched with increased depth
-		} else if inCheck && SeeSign(pos, evaled[i].Move) {
-			newDepth++
-		}
+		newDepth := depth - 1 + extension
 
 		// Store move if it is quiet
 		if !isNoisy {
-			quietsSearched = append(quietsSearched, evaled[i].Move)
+			quietsSearched = append(quietsSearched, move)
 		}
 
 		// Search conditions as in Ethereal
 		// Search with null window and reduced depth if lmr
 		if reduction > 0 {
-			tmpVal = -t.alphaBeta(newDepth-reduction, -(alpha + 1), -alpha, height+1, childInCheck)
+			val = -t.alphaBeta(newDepth-reduction, -(alpha + 1), -alpha, height+1, childInCheck, true)
 		}
 		// Search with null window without reduced depth if
 		// search with lmr null window exceeded alpha or
 		// not in pv (this is the same as normal search as non pv nodes are searched with null window anyway)
 		// pv and not first move
-		if (reduction > 0 && tmpVal > alpha) || (reduction == 0 && !(pvNode && moveCount == 1)) {
-			tmpVal = -t.alphaBeta(newDepth, -(alpha + 1), -alpha, height+1, childInCheck)
+		if (reduction > 0 && val > alpha) || (reduction == 0 && !(pvNode && moveCount == 1)) {
+			val = -t.alphaBeta(newDepth, -(alpha + 1), -alpha, height+1, childInCheck, !cutNode)
 		}
 		// If pvNode and first move or search with null window exceeded alpha, search with full window
-		if pvNode && (moveCount == 1 || tmpVal > alpha) {
-			tmpVal = -t.alphaBeta(newDepth, -beta, -alpha, height+1, childInCheck)
+		if pvNode && (moveCount == 1 || val > alpha) {
+			val = -t.alphaBeta(newDepth, -beta, -alpha, height+1, childInCheck, false)
 		}
 
-		if tmpVal > val {
-			val = tmpVal
+		if val > bestVal {
+			bestVal = val
+			bestMove = move
 			if val > alpha {
 				alpha = val
-				bestMove = evaled[i].Move
 				if alpha >= beta {
 					break
 				}
-				t.stack[height].PV.assign(evaled[i].Move, &t.stack[height+1].PV)
+				t.stack[height].PV.assign(move, &t.stack[height+1].PV)
 			}
 		}
 	}
@@ -471,7 +488,6 @@ func (t *thread) alphaBeta(depth, alpha, beta, height int, inCheck bool) int {
 		return t.contempt(pos, depth)
 	}
 
-afterLoop:
 	if alpha >= beta && bestMove != NullMove && !bestMove.IsCaptureOrPromotion() {
 		t.Update(pos, quietsSearched, bestMove, depth, height)
 	}
@@ -484,11 +500,11 @@ afterLoop:
 	} else {
 		flag = TransExact
 	}
-	transposition.GlobalTransTable.Set(pos.Key, transposition.ValueToTrans(alpha, height), depth, bestMove, flag)
+	transposition.GlobalTransTable.Set(pos.Key, transposition.ValueToTrans(alpha, height), t.getEvaluation(height), depth, bestMove, flag)
 	return alpha
 }
 
-func (t *thread) isMoveSingular(depth, height int, hashMove Move, hashValue int, moves []EvaledMove) bool {
+func (t *thread) isMoveSingular(depth, height int, hashMove Move, hashValue int, cutNode bool) bool {
 	var pos *Position = &t.stack[height].position
 	var child *Position = &t.stack[height+1].position
 	// Store child as we already made a move into it in alphaBeta
@@ -496,26 +512,30 @@ func (t *thread) isMoveSingular(depth, height int, hashMove Move, hashValue int,
 	val := -Mate
 	rBeta := Max(hashValue-depth, -Mate)
 	quiets := 0
-	for i := range moves {
-		if !pos.MakeMove(moves[i].Move, child) {
+	t.stack[height].InitSingular()
+	for {
+		move := t.getNextMove(pos, depth, height)
+		if move == NullMove || t.stack[height].GetMoveStage() >= BAD_NOISY {
+			break
+		}
+		if !pos.MakeMove(move, child) {
 			continue
 		}
-		t.SetCurrentMove(height, moves[i].Move)
-		val = -t.alphaBeta(depth/2-1, -rBeta-1, -rBeta, height+1, child.IsInCheck())
+		t.SetCurrentMove(height, move)
+		val = -t.alphaBeta(depth/2-1, -rBeta-1, -rBeta, height+1, child.IsInCheck(), cutNode)
 		if val > rBeta {
 			break
 		}
-		if !moves[i].Move.IsCaptureOrPromotion() {
+		if !move.IsCaptureOrPromotion() {
 			quiets++
 			if quiets >= 6 {
 				break
 			}
-		} else if moves[i].Value < MaxBadCapture {
-			break
 		}
 	}
 	// restore child
 	*child = oldChild
+	t.stack[height].RestoreFromSingular()
 	return val <= rBeta
 }
 
@@ -596,12 +616,16 @@ func (t *thread) depSearch(depth, alpha, beta int, moves []EvaledMove) result {
 	var pos *Position = &t.stack[0].position
 	var child *Position = &t.stack[1].position
 	var bestMove Move = NullMove
+	alphaOrig := alpha
 	inCheck := pos.IsInCheck()
 	moveCount := 0
+	eval := int16(Evaluate(pos))
+	t.setEvaluation(0, eval)
 	t.stack[0].PV.clear()
-	t.stack[0].InvalidateEvaluation()
-	t.MoveEvaluator.ResetKillers(1)
+	t.ResetKillers(1)
 	quietsSearched := t.stack[0].quietsSearched[:0]
+	bestVal := MinInt
+	var val int
 
 	for i := range moves {
 		pos.MakeLegalMove(moves[i].Move, child)
@@ -626,7 +650,6 @@ func (t *thread) depSearch(depth, alpha, beta int, moves []EvaledMove) result {
 				reduction = Max(0, Min(depth-2, reduction))
 			}
 		}
-		var val int
 		newDepth := depth - 1
 		if moves[i].IsCastling() {
 			newDepth++
@@ -634,19 +657,22 @@ func (t *thread) depSearch(depth, alpha, beta int, moves []EvaledMove) result {
 			newDepth++
 		}
 		if reduction > 0 {
-			val = -t.alphaBeta(newDepth-reduction, -(alpha + 1), -alpha, 1, childInCheck)
+			val = -t.alphaBeta(newDepth-reduction, -(alpha + 1), -alpha, 1, childInCheck, true)
 			if val <= alpha {
 				continue
 			}
 		}
-		val = -t.alphaBeta(newDepth, -beta, -alpha, 1, childInCheck)
-		if val > alpha {
-			alpha = val
+		val = -t.alphaBeta(newDepth, -beta, -alpha, 1, childInCheck, false)
+		if val > bestVal {
+			bestVal = val
 			bestMove = moves[i].Move
-			if alpha >= beta {
-				break
+			if val > alpha {
+				alpha = val
+				if alpha >= beta {
+					break
+				}
+				t.stack[0].PV.assign(moves[i].Move, &t.stack[1].PV)
 			}
-			t.stack[0].PV.assign(moves[i].Move, &t.stack[1].PV)
 		}
 	}
 	if moveCount == 0 {
@@ -661,6 +687,15 @@ func (t *thread) depSearch(depth, alpha, beta int, moves []EvaledMove) result {
 	}
 	t.EvaluateMoves(pos, moves, bestMove, 0, depth)
 	sortMoves(moves)
+	var flag int
+	if alpha == alphaOrig {
+		flag = TransAlpha
+	} else if alpha >= beta {
+		flag = TransBeta
+	} else {
+		flag = TransExact
+	}
+	transposition.GlobalTransTable.Set(pos.Key, transposition.ValueToTrans(alpha, 0), eval, depth, bestMove, flag)
 	return result{bestMove, alpha, depth, cloneMoves(t.stack[0].PV.items[:t.stack[0].PV.size])}
 }
 
@@ -681,7 +716,8 @@ func (e *Engine) singleThreadBestMove(ctx context.Context, rootMoves []EvaledMov
 		case <-ctx.Done():
 			return lastBestMove
 		case res := <-resultChan:
-			e.Update(SearchInfo{newUciScore(res.value), i, thread.nodes, res.moves})
+			timeSinceStart := e.getElapsedTime()
+			e.Update(SearchInfo{newUciScore(res.value), res.depth, thread.nodes, int(float64(thread.nodes) / timeSinceStart.Seconds()), int(timeSinceStart.Milliseconds()), res.moves})
 			if res.value >= ValueWin && depthToMate(res.value) <= i {
 				return res.Move
 			}
@@ -710,15 +746,11 @@ func (t *thread) iterativeDeepening(moves []EvaledMove, resultChan chan result, 
 			moves[i], moves[j] = moves[j], moves[i]
 		})
 	}
-	// Depth skipping pattern taken from Ethereal
-	cycle := idx % SMPCycles
+
 	for depth := 1; depth <= MAX_HEIGHT; depth++ {
 		res = t.aspirationWindow(depth, lastValue, moves)
 		resultChan <- res
 		lastValue = res.value
-		if !mainThread && (depth+cycle)%SkipDepths[cycle] == 0 {
-			depth += SkipSize[cycle]
-		}
 	}
 }
 
@@ -728,10 +760,7 @@ func (e *Engine) bestMove(ctx context.Context, pos *Position) Move {
 		e.threads[i].nodes = 0
 	}
 
-	rootMoves := pos.GenerateAllLegalMoves()
-	if len(rootMoves) == 1 {
-		return rootMoves[0].Move
-	}
+	rootMoves := GenerateAllLegalMoves(pos)
 
 	if fathom.IsDTZProbeable(pos) {
 		if ok, bestMove, wdl, dtz := fathom.ProbeDTZ(pos, rootMoves); ok {
@@ -743,13 +772,13 @@ func (e *Engine) bestMove(ctx context.Context, pos *Position) Move {
 			} else {
 				score = 0
 			}
-			e.Update(SearchInfo{newUciScore(score), MAX_HEIGHT - 1, 0, []Move{bestMove}})
+			e.Update(SearchInfo{newUciScore(score), MAX_HEIGHT - 1, 0, 1, 0, []Move{bestMove}})
 			return bestMove
 		}
 	}
 
 	ordMove := NullMove
-	if hashOk, _, _, hashMove, _ := transposition.GlobalTransTable.Get(pos.Key); hashOk {
+	if hashOk, _, _, _, hashMove, _ := transposition.GlobalTransTable.Get(pos.Key); hashOk {
 		ordMove = hashMove
 	}
 	e.threads[0].EvaluateMoves(pos, rootMoves, ordMove, 0, 127)
@@ -760,23 +789,13 @@ func (e *Engine) bestMove(ctx context.Context, pos *Position) Move {
 		return e.singleThreadBestMove(ctx, rootMoves)
 	}
 
-	var wg = &sync.WaitGroup{}
 	resultChan := make(chan result)
 	for i := range e.threads {
-		wg.Add(1)
-		// Start parallel searching
 		go func(idx int) {
 			defer recoverFromTimeout()
 			e.threads[idx].iterativeDeepening(cloneEvaledMoves(rootMoves), resultChan, idx)
-			wg.Done()
 		}(i)
 	}
-
-	// Wait for closing
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
 
 	prevDepth := 0
 	var lastBestMove Move
@@ -791,7 +810,8 @@ func (e *Engine) bestMove(ctx context.Context, pos *Position) Move {
 				continue
 			}
 			nodes := e.nodes()
-			e.Update(SearchInfo{newUciScore(res.value), res.depth, nodes, res.moves})
+			timeSinceStart := e.getElapsedTime()
+			e.Update(SearchInfo{newUciScore(res.value), res.depth, nodes, int(float64(nodes) / timeSinceStart.Seconds()), int(timeSinceStart.Milliseconds()), res.moves})
 			if res.value >= ValueWin && depthToMate(res.value) <= res.depth {
 				return res.Move
 			}
